@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+*.pyc
+__pycache__/
+.pytest_cache/
+
+# Private local files. Store secrets in GitHub Actions Secrets instead.
+DIGEST_CONFIG_JSON
+secrets/
+*.secret
+
+# Generated digest outputs and private run state.
+daily_digest_*.txt
+outputs/
+data/sent_items.json

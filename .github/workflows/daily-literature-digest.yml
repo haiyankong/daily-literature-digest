@@ -1,0 +1,63 @@
+name: Daily Literature Digest
+
+on:
+  schedule:
+    # GitHub Actions uses UTC. Running at both 09:30 and 10:30 UTC lets the
+    # script hit 5:30 AM America/New_York across daylight-saving changes.
+    - cron: "30 9,10 * * *"
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "How many days of newly indexed literature to search"
+        required: false
+        default: "2"
+
+permissions:
+  contents: read
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Produce and send digest
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL_PROVIDER: ${{ vars.MODEL_PROVIDER }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+          ANTHROPIC_VERSION: ${{ vars.ANTHROPIC_VERSION }}
+          MAX_CANDIDATES_FOR_MODEL: ${{ vars.MAX_CANDIDATES_FOR_MODEL }}
+          MAX_EMAIL_CANDIDATES: ${{ vars.MAX_EMAIL_CANDIDATES }}
+          SECTION_A_CANDIDATE_CAP: ${{ vars.SECTION_A_CANDIDATE_CAP }}
+          SECTION_B_CANDIDATE_CAP: ${{ vars.SECTION_B_CANDIDATE_CAP }}
+          SECTION_C_CANDIDATE_CAP: ${{ vars.SECTION_C_CANDIDATE_CAP }}
+          RESPECT_SECTION_ROW_LIMITS: ${{ vars.RESPECT_SECTION_ROW_LIMITS }}
+          MAX_OUTPUT_TOKENS: ${{ vars.MAX_OUTPUT_TOKENS }}
+          OPENAI_MAX_OUTPUT_TOKENS: ${{ vars.OPENAI_MAX_OUTPUT_TOKENS }}
+          ANTHROPIC_MAX_OUTPUT_TOKENS: ${{ vars.ANTHROPIC_MAX_OUTPUT_TOKENS }}
+          DIGEST_CONFIG_JSON: ${{ secrets.DIGEST_CONFIG_JSON }}
+          DIGEST_CONFIG_JSON_B64: ${{ secrets.DIGEST_CONFIG_JSON_B64 }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          DIGEST_RECIPIENT: ${{ secrets.DIGEST_RECIPIENT }}
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '2' }}
+        run: |
+          args="--send --lookback-days ${LOOKBACK_DAYS}"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            args="$args --time-gate"
+          fi
+          python scripts/daily_literature_digest.py $args
