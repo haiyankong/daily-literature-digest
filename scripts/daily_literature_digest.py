@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import html
 import json
 import os
@@ -468,27 +469,47 @@ def load_state() -> set[str]:
         return set()
     try:
         data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-        return {str(item.get("key", "")) for item in data.get("items", []) if item.get("key")}
+        out = set()
+        for item in data.get("items", []):
+            if item.get("key_hash"):
+                out.add(str(item["key_hash"]))
+            elif item.get("key"):
+                out.add(candidate_key_hash(str(item["key"])))
+        return out
     except Exception:
         return set()
 
 
-def save_state(sent_keys: set[str], new_items: list[Candidate], now_iso: str) -> None:
+def candidate_key_hash(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def save_state(sent_key_hashes: set[str], new_items: list[Candidate], now_iso: str) -> None:
     existing: dict[str, dict[str, Any]] = {}
     if STATE_PATH.exists():
         try:
             for item in json.loads(STATE_PATH.read_text(encoding="utf-8")).get("items", []):
-                if item.get("key"):
-                    existing[item["key"]] = item
+                if item.get("key_hash"):
+                    existing[str(item["key_hash"])] = {
+                        "key_hash": str(item["key_hash"]),
+                        "sent_at": item.get("sent_at", ""),
+                    }
+                elif item.get("key"):
+                    key_hash = candidate_key_hash(str(item["key"]))
+                    existing[key_hash] = {
+                        "key_hash": key_hash,
+                        "sent_at": item.get("sent_at", ""),
+                    }
         except Exception:
             existing = {}
 
+    for key_hash in sent_key_hashes:
+        existing.setdefault(key_hash, {"key_hash": key_hash, "sent_at": ""})
+
     for candidate in new_items:
-        existing[candidate.key] = {
-            "key": candidate.key,
-            "title": candidate.title,
-            "venue": candidate.venue,
-            "date": candidate.date,
+        key_hash = candidate_key_hash(candidate.key)
+        existing[key_hash] = {
+            "key_hash": key_hash,
             "sent_at": now_iso,
         }
 
@@ -503,7 +524,7 @@ def dedupe_candidates(candidates: list[Candidate], sent: set[str]) -> list[Candi
     for candidate in candidates:
         if not candidate.title:
             continue
-        key = candidate.key
+        key = candidate_key_hash(candidate.key)
         if key in seen or key in sent:
             continue
         seen.add(key)

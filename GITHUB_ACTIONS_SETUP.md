@@ -14,6 +14,8 @@ loaded from GitHub Secrets.
 - Sends the digest through Gmail SMTP using the sender and recipient stored in
   GitHub Secrets.
 - Does not upload digest artifacts or commit sent-item history.
+- Uses an Actions cache with compact sent-item fingerprints to reduce repeat
+  entries across runs.
 - Sends all discovered candidate records that fit the digest configuration, up
   to the global candidate cap. The model formats and summarizes the digest; it
   is not asked to choose only a small subset.
@@ -130,8 +132,7 @@ two UTC cron entries do not send duplicate emails across daylight-saving changes
 
 - GitHub Actions schedule times are not guaranteed to start at the exact minute;
   a small delay is normal.
-- The workflow does not commit sent-item history. The digest still asks the model
-  to avoid duplicates within each run, but cross-day duplicate suppression is
-  intentionally conservative.
+- A small Actions cache is used to reduce repeat entries across runs. Cache
+  entries may expire, so occasional repeats can still happen.
 - To change the delivery address later, update only the `DIGEST_RECIPIENT`
   secret.

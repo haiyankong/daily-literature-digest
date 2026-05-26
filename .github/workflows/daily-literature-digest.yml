@@ -32,6 +32,14 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
+      - name: Restore sent-item cache
+        uses: actions/cache@v4
+        with:
+          path: data/sent_items.json
+          key: daily-literature-digest-sent-items-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            daily-literature-digest-sent-items-
+
       - name: Produce and send digest
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
