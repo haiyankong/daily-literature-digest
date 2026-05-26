@@ -548,6 +548,15 @@ def candidate_search_text(candidate: Candidate) -> str:
     ).lower()
 
 
+def candidate_paper_text(candidate: Candidate) -> str:
+    """Only text from the paper itself (title + abstract), not pipeline metadata.
+
+    Used by require_terms filtering so that query strings embedded in
+    why_candidate cannot cause an off-topic paper to pass a require_terms gate.
+    """
+    return " ".join([candidate.title, candidate.abstract]).lower()
+
+
 def candidate_matches_term(candidate: Candidate, term: str) -> bool:
     term = normalize_space(term).lower()
     if not term:
@@ -560,6 +569,47 @@ def candidate_matches_term(candidate: Candidate, term: str) -> bool:
 
 def candidate_matches_any_term(candidate: Candidate, terms: list[str]) -> bool:
     return any(candidate_matches_term(candidate, str(term)) for term in terms)
+
+
+def candidate_matches_require_term(candidate: Candidate, term: str) -> bool:
+    """Check whether a required term appears in the paper's own text (title + abstract)."""
+    term = normalize_space(term).lower()
+    if not term:
+        return False
+    text = candidate_paper_text(candidate)
+    if re.search(r"\w", term):
+        return bool(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text))
+    return term in text
+
+
+def require_filter_candidates(candidates: list[Candidate], *configs: dict[str, Any]) -> list[Candidate]:
+    """Keep only candidates that contain at least one require_term in their title or abstract.
+
+    This is intentionally strict: it checks candidate_paper_text() (title +
+    abstract only) so that query phrases embedded in the why_candidate field
+    cannot cause an off-topic paper to slip through.
+
+    If no section config supplies any require_terms, all candidates are kept.
+    """
+    require_terms: list[str] = []
+    for config in configs:
+        terms = config.get("require_terms") if isinstance(config, dict) else []
+        if isinstance(terms, list):
+            require_terms.extend(str(term) for term in terms)
+
+    if not require_terms:
+        return candidates
+
+    kept = []
+    dropped = 0
+    for candidate in candidates:
+        if any(candidate_matches_require_term(candidate, t) for t in require_terms):
+            kept.append(candidate)
+        else:
+            dropped += 1
+    if dropped:
+        print(f"require_terms filter dropped {dropped} off-topic candidate(s).")
+    return kept
 
 
 def nested_filter_config(section_config: dict[str, Any], key: str, name: str) -> dict[str, Any]:
@@ -614,6 +664,11 @@ def collect_candidates(start_date: str, end_date: str, email: str, config: dict[
                 found.extend(search_openalex(query, section_title, default_category, why, start_date, end_date, email, rows))
                 if include_pubmed:
                     found.extend(pubmed_search(query, section_title, default_category, why, start_date, end_date, email, rows))
+                # Apply require_terms first: drop papers that do not contain
+                # a required keyword in their own title or abstract.  This is
+                # the primary guard against Crossref/OpenAlex returning papers
+                # that matched a broad OR-clause rather than the core topic keyword.
+                found = require_filter_candidates(found, section_config)
                 candidates.extend(filter_candidates(found, section_config, query_config))
                 time.sleep(0.05)
             continue
