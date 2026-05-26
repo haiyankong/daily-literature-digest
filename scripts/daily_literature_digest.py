@@ -100,9 +100,9 @@ def model_provider(config: dict[str, Any]) -> str:
 
 def section_caps() -> dict[str, int]:
     return {
-        "Section A": int(env("SECTION_A_CANDIDATE_CAP", "20")),
-        "Section B": int(env("SECTION_B_CANDIDATE_CAP", "15")),
-        "Section C": int(env("SECTION_C_CANDIDATE_CAP", "40")),
+        "Section A": int(env("SECTION_A_CANDIDATE_CAP", "12")),
+        "Section B": int(env("SECTION_B_CANDIDATE_CAP", "8")),
+        "Section C": int(env("SECTION_C_CANDIDATE_CAP", "60")),
     }
 
 
@@ -298,9 +298,13 @@ def search_crossref_journal(
                 category,
                 f"Newly indexed item from tracked journal: {journal}",
             )
+            # Crossref's query.container-title is a fuzzy text search and can
+            # return papers from similarly-named journals (e.g. searching "Brain"
+            # also returns "Brain Research", "Brain and Cognition", etc.).
+            # Only keep candidates whose recorded venue actually contains the
+            # requested journal name, or whose recorded venue is empty (rare cases
+            # where Crossref has no container-title metadata).
             if journal.lower() in candidate.venue.lower() or not candidate.venue:
-                out.append(candidate)
-            else:
                 out.append(candidate)
         return out
     except Exception as exc:
@@ -544,20 +548,42 @@ def candidate_search_text(candidate: Candidate) -> str:
     ).lower()
 
 
-def candidate_matches_any_term(candidate: Candidate, terms: list[str]) -> bool:
+def candidate_matches_term(candidate: Candidate, term: str) -> bool:
+    term = normalize_space(term).lower()
+    if not term:
+        return False
     text = candidate_search_text(candidate)
-    return any(normalize_space(term).lower() in text for term in terms if normalize_space(term))
+    if re.search(r"\w", term):
+        return bool(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text))
+    return term in text
 
 
-def filter_section_candidates(section_config: dict[str, Any], candidates: list[Candidate]) -> list[Candidate]:
-    exclude_terms = section_config.get("exclude_terms") or []
-    if not isinstance(exclude_terms, list) or not exclude_terms:
+def candidate_matches_any_term(candidate: Candidate, terms: list[str]) -> bool:
+    return any(candidate_matches_term(candidate, str(term)) for term in terms)
+
+
+def nested_filter_config(section_config: dict[str, Any], key: str, name: str) -> dict[str, Any]:
+    filters = section_config.get(key) or {}
+    if not isinstance(filters, dict):
+        return {}
+    config = filters.get(name) or {}
+    return config if isinstance(config, dict) else {}
+
+
+def filter_candidates(candidates: list[Candidate], *configs: dict[str, Any]) -> list[Candidate]:
+    exclude_terms: list[str] = []
+    for config in configs:
+        terms = config.get("exclude_terms") if isinstance(config, dict) else []
+        if isinstance(terms, list):
+            exclude_terms.extend(str(term) for term in terms)
+
+    if not exclude_terms:
         return candidates
 
     return [
         candidate
         for candidate in candidates
-        if not candidate_matches_any_term(candidate, [str(term) for term in exclude_terms])
+        if not candidate_matches_any_term(candidate, exclude_terms)
     ]
 
 
@@ -573,6 +599,7 @@ def collect_candidates(start_date: str, end_date: str, email: str, config: dict[
             rows = rows_for_search(section_config, "rows_per_query")
             include_pubmed = bool(section_config.get("include_pubmed", True))
             for item in section_config.get("queries", []):
+                query_config = item if isinstance(item, dict) else {}
                 if isinstance(item, str):
                     query = item
                     why = section_config.get("instructions", "Private topic-search query.")
@@ -587,7 +614,7 @@ def collect_candidates(start_date: str, end_date: str, email: str, config: dict[
                 found.extend(search_openalex(query, section_title, default_category, why, start_date, end_date, email, rows))
                 if include_pubmed:
                     found.extend(pubmed_search(query, section_title, default_category, why, start_date, end_date, email, rows))
-                candidates.extend(filter_section_candidates(section_config, found))
+                candidates.extend(filter_candidates(found, section_config, query_config))
                 time.sleep(0.05)
             continue
 
@@ -607,7 +634,14 @@ def collect_candidates(start_date: str, end_date: str, email: str, config: dict[
                 if not journal:
                     continue
                 found = search_crossref_journal(journal, section_title, category, start_date, end_date, email, rows)
-                candidates.extend(filter_section_candidates(section_config, found))
+                candidates.extend(
+                    filter_candidates(
+                        found,
+                        section_config,
+                        nested_filter_config(section_config, "category_filters", category),
+                        nested_filter_config(section_config, "journal_filters", journal),
+                    )
+                )
                 time.sleep(0.05)
             continue
 
