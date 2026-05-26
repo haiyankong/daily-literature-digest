@@ -92,6 +92,18 @@ def max_output_tokens() -> int:
     return int(env("MAX_OUTPUT_TOKENS", "9000"))
 
 
+def model_api_timeout_seconds() -> int:
+    return int(env("MODEL_API_TIMEOUT_SECONDS", "300"))
+
+
+def model_api_retries() -> int:
+    return max(int(env("MODEL_API_RETRIES", "3")), 1)
+
+
+def model_api_retry_delay_seconds(attempt: int) -> int:
+    return int(env("MODEL_API_RETRY_DELAY_SECONDS", "10")) * attempt
+
+
 def model_provider(config: dict[str, Any]) -> str:
     provider = env("MODEL_PROVIDER", str(config.get("model_provider") or DEFAULT_MODEL_PROVIDER))
     provider = normalize_space(provider).lower()
@@ -198,6 +210,47 @@ def private_response_error(provider: str, response: requests.Response) -> Runtim
     if reason:
         message += f" reason={reason}"
     return RuntimeError(message)
+
+
+def transient_model_status(status_code: int) -> bool:
+    return status_code in {408, 409, 429, 500, 502, 503, 504}
+
+
+def post_model_json(provider: str, url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+    attempts = model_api_retries()
+    timeout = model_api_timeout_seconds()
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            if attempt >= attempts:
+                raise RuntimeError(
+                    f"{provider} request failed after {attempts} attempts: {private_error_summary(exc)}"
+                ) from None
+            print(
+                f"{provider} request attempt {attempt}/{attempts} failed: {private_error_summary(exc)}; retrying.",
+                file=sys.stderr,
+            )
+            time.sleep(model_api_retry_delay_seconds(attempt))
+            continue
+        except requests.exceptions.RequestException as exc:
+            raise RuntimeError(f"{provider} request failed: {private_error_summary(exc)}") from None
+
+        if response.status_code >= 400:
+            if transient_model_status(response.status_code) and attempt < attempts:
+                print(
+                    f"{provider} API transient error attempt {attempt}/{attempts}: "
+                    f"status={response.status_code}; retrying.",
+                    file=sys.stderr,
+                )
+                time.sleep(model_api_retry_delay_seconds(attempt))
+                continue
+            raise private_response_error(provider, response)
+
+        return response.json()
+
+    raise RuntimeError(f"{provider} request failed after {attempts} attempts.")
 
 
 def crossref_to_candidate(item: dict[str, Any], section: str, category: str, why: str) -> Candidate:
@@ -793,22 +846,19 @@ def compose_with_openai(prompt: str) -> str:
 
     model = env("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
     output_tokens = int(env("OPENAI_MAX_OUTPUT_TOKENS", str(max_output_tokens())))
-    response = requests.post(
+    data = post_model_json(
+        "OpenAI",
         "https://api.openai.com/v1/responses",
-        headers={
+        {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
-        json={
+        {
             "model": model,
             "input": prompt,
             "max_output_tokens": output_tokens,
         },
-        timeout=120,
     )
-    if response.status_code >= 400:
-        raise private_response_error("OpenAI", response)
-    data = response.json()
     if data.get("output_text"):
         return data["output_text"].strip()
 
@@ -830,24 +880,20 @@ def compose_with_anthropic(prompt: str) -> str:
 
     model = env("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
     output_tokens = int(env("ANTHROPIC_MAX_OUTPUT_TOKENS", str(max_output_tokens())))
-    response = requests.post(
+    data = post_model_json(
+        "Anthropic",
         "https://api.anthropic.com/v1/messages",
-        headers={
+        {
             "x-api-key": api_key,
             "anthropic-version": env("ANTHROPIC_VERSION", DEFAULT_ANTHROPIC_VERSION),
             "Content-Type": "application/json",
         },
-        json={
+        {
             "model": model,
             "max_tokens": output_tokens,
             "messages": [{"role": "user", "content": prompt}],
         },
-        timeout=120,
     )
-    if response.status_code >= 400:
-        raise private_response_error("Anthropic", response)
-
-    data = response.json()
     chunks = []
     for content in data.get("content", []):
         if content.get("type") == "text" and content.get("text"):
