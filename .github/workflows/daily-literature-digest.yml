@@ -22,10 +22,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -33,7 +33,7 @@ jobs:
         run: python -m pip install -r requirements.txt
 
       - name: Restore sent-item cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: data/sent_items.json
           key: daily-literature-digest-sent-items-${{ github.run_id }}-${{ github.run_attempt }}
