@@ -542,15 +542,28 @@ def load_state() -> set[str]:
         return set()
 
 
+def load_sent_dates() -> set[str]:
+    if not STATE_PATH.exists():
+        return set()
+    try:
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        return {str(value) for value in data.get("sent_dates", []) if value}
+    except Exception:
+        return set()
+
+
 def candidate_key_hash(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
-def save_state(sent_key_hashes: set[str], new_items: list[Candidate], now_iso: str) -> None:
+def save_state(sent_key_hashes: set[str], new_items: list[Candidate], now_iso: str, sent_date: str = "") -> None:
     existing: dict[str, dict[str, Any]] = {}
+    sent_dates = set()
     if STATE_PATH.exists():
         try:
-            for item in json.loads(STATE_PATH.read_text(encoding="utf-8")).get("items", []):
+            data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            sent_dates = {str(value) for value in data.get("sent_dates", []) if value}
+            for item in data.get("items", []):
                 if item.get("key_hash"):
                     existing[str(item["key_hash"])] = {
                         "key_hash": str(item["key_hash"]),
@@ -576,8 +589,14 @@ def save_state(sent_key_hashes: set[str], new_items: list[Candidate], now_iso: s
         }
 
     trimmed = sorted(existing.values(), key=lambda x: x.get("sent_at", ""), reverse=True)[:1500]
+    if sent_date:
+        sent_dates.add(sent_date)
+    trimmed_sent_dates = sorted(sent_dates)[-120:]
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps({"items": trimmed}, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    STATE_PATH.write_text(
+        json.dumps({"items": trimmed, "sent_dates": trimmed_sent_dates}, indent=2, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def dedupe_candidates(candidates: list[Candidate], sent: set[str]) -> list[Candidate]:
@@ -1092,12 +1111,15 @@ def send_email(subject: str, body: str, sender: str, recipient: str, app_passwor
         smtp.sendmail(sender, [recipient], msg.as_string())
 
 
-def should_run_time_gate() -> bool:
+def should_run_time_gate(now_local: datetime | None = None) -> bool:
     if ZoneInfo is None:
         return True
-    now = datetime.now(ZoneInfo(LOCAL_TZ))
+    now = now_local or datetime.now(ZoneInfo(LOCAL_TZ))
     target_hour = int(env("TARGET_LOCAL_HOUR", "5"))
-    return now.hour == target_hour
+    window_hours = max(int(env("SCHEDULE_WINDOW_HOURS", "6")), 1)
+    window_start = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+    window_end = window_start + timedelta(hours=window_hours)
+    return window_start <= now < window_end
 
 
 def parse_args() -> argparse.Namespace:
@@ -1111,14 +1133,19 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.time_gate and not should_run_time_gate():
-        print(f"Skipping: current {LOCAL_TZ} time is outside the target local hour.")
-        return 0
+    now_local = datetime.now(ZoneInfo(LOCAL_TZ)) if ZoneInfo else datetime.now()
+    scheduled_sent_date = now_local.date().isoformat() if args.time_gate else ""
+    if args.time_gate:
+        if not should_run_time_gate(now_local):
+            print(f"Skipping: current {LOCAL_TZ} time is outside the scheduled delivery window.")
+            return 0
+        if scheduled_sent_date in load_sent_dates():
+            print(f"Skipping: scheduled digest already sent for {scheduled_sent_date}.")
+            return 0
 
     sender = required_env("GMAIL_ADDRESS")
     recipient = required_env("DIGEST_RECIPIENT")
     config = load_digest_config()
-    now_local = datetime.now(ZoneInfo(LOCAL_TZ)) if ZoneInfo else datetime.now()
     end = now_local.date()
     start = end - timedelta(days=max(args.lookback_days, 1))
     start_date = start.isoformat()
@@ -1150,7 +1177,7 @@ def main() -> int:
         subject = extract_subject(body, start_date, end_date)
         send_email(subject, body, sender, recipient, env("GMAIL_APP_PASSWORD"))
         print(f"Sent digest to {recipient} from {sender}.")
-        save_state(sent_state, candidates, datetime.now(timezone.utc).isoformat())
+        save_state(sent_state, candidates, datetime.now(timezone.utc).isoformat(), sent_date=scheduled_sent_date)
     else:
         print("Dry run only; email not sent.")
 
