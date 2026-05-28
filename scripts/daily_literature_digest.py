@@ -115,6 +115,20 @@ def model_provider(config: dict[str, Any]) -> str:
     return "anthropic" if provider == "claude" else provider
 
 
+def active_model_name(config: dict[str, Any]) -> str:
+    provider = model_provider(config)
+    if provider == "anthropic":
+        return env("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
+    if provider == "openai":
+        return env("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+    return provider
+
+
+def digest_subject(start_date: str, end_date: str, generated_date: str, config: dict[str, Any]) -> str:
+    model = active_model_name(config)
+    return f"Daily Literature Digest (coverage {start_date} → {end_date}) — generated {generated_date} by {model}"
+
+
 def section_caps() -> dict[str, int]:
     return {
         "Section A": int(env("SECTION_A_CANDIDATE_CAP", "12")),
@@ -907,7 +921,12 @@ def build_digest_prompt(
     recipient: str,
     config: dict[str, Any],
 ) -> str:
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = (
+        datetime.now(ZoneInfo(LOCAL_TZ)).date().isoformat()
+        if ZoneInfo
+        else datetime.now().date().isoformat()
+    )
+    subject = digest_subject(start_date, end_date, today, config)
     return f"""
 You are preparing an email-ready daily literature digest for a psychology and cognitive-neuroscience researcher.
 
@@ -928,7 +947,7 @@ Hard requirements:
 
 Required output structure:
 
-Subject: Daily Literature Digest - {start_date} to {end_date}
+Subject: {subject}
 From: {sender}
 To: {recipient}
 
@@ -1060,8 +1079,13 @@ def fallback_digest(
     recipient: str,
     config: dict[str, Any],
 ) -> str:
+    generated_date = (
+        datetime.now(ZoneInfo(LOCAL_TZ)).date().isoformat()
+        if ZoneInfo
+        else datetime.now().date().isoformat()
+    )
     lines = [
-        f"Subject: Daily Literature Digest - {start_date} to {end_date}",
+        f"Subject: {digest_subject(start_date, end_date, generated_date, config)}",
         f"From: {sender}",
         f"To: {recipient}",
         "",
@@ -1083,13 +1107,14 @@ def fallback_digest(
     return "\n".join(lines)
 
 
-def extract_subject(body: str, start_date: str, end_date: str) -> str:
-    for line in body.splitlines()[:8]:
-        if line.lower().startswith("subject:"):
-            subject = normalize_space(line.split(":", 1)[1])
-            if subject:
-                return subject
-    return f"Daily Literature Digest - {start_date} to {end_date}"
+def extract_subject(
+    body: str,
+    start_date: str,
+    end_date: str,
+    generated_date: str,
+    config: dict[str, Any],
+) -> str:
+    return digest_subject(start_date, end_date, generated_date, config)
 
 
 def send_email(subject: str, body: str, sender: str, recipient: str, app_password: str) -> None:
@@ -1174,7 +1199,7 @@ def main() -> int:
     print(f"Wrote digest to {output_path}")
 
     if args.send:
-        subject = extract_subject(body, start_date, end_date)
+        subject = extract_subject(body, start_date, end_date, end_date, config)
         send_email(subject, body, sender, recipient, env("GMAIL_APP_PASSWORD"))
         print(f"Sent digest to {recipient} from {sender}.")
         save_state(sent_state, candidates, datetime.now(timezone.utc).isoformat(), sent_date=scheduled_sent_date)
