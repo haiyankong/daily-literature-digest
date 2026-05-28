@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import calendar
 import hashlib
 import html
 import json
@@ -90,6 +91,10 @@ def max_email_candidates() -> int:
 
 def max_output_tokens() -> int:
     return int(env("MAX_OUTPUT_TOKENS", "9000"))
+
+
+def max_publication_age_days() -> int:
+    return int(env("MAX_PUBLICATION_AGE_DAYS", "365"))
 
 
 def model_api_timeout_seconds() -> int:
@@ -589,6 +594,77 @@ def dedupe_candidates(candidates: list[Candidate], sent: set[str]) -> list[Candi
     return out
 
 
+def parse_publication_date(value: str) -> datetime.date | None:
+    text = normalize_space(value)
+    match = re.match(r"^(\d{4})(?:[-/ ]([A-Za-z]{3,9}|\d{1,2})(?:[-/ ](\d{1,2}))?)?", text)
+    if not match:
+        return None
+
+    year = int(match.group(1))
+    month_text = match.group(2)
+    day_text = match.group(3)
+
+    if not month_text:
+        return datetime(year, 12, 31).date()
+
+    if month_text.isdigit():
+        month = int(month_text)
+    else:
+        month_map = {
+            name.lower(): index
+            for index, name in enumerate(calendar.month_name)
+            if name
+        }
+        month_map.update(
+            {
+                name.lower(): index
+                for index, name in enumerate(calendar.month_abbr)
+                if name
+            }
+        )
+        month = month_map.get(month_text.lower())
+        if not month:
+            return datetime(year, 12, 31).date()
+
+    if not 1 <= month <= 12:
+        return datetime(year, 12, 31).date()
+
+    if day_text:
+        day = int(day_text)
+    else:
+        day = calendar.monthrange(year, month)[1]
+
+    try:
+        return datetime(year, month, day).date()
+    except ValueError:
+        return datetime(year, month, calendar.monthrange(year, month)[1]).date()
+
+
+def filter_recent_publications(candidates: list[Candidate], end_date: str) -> list[Candidate]:
+    max_age = max_publication_age_days()
+    if max_age <= 0:
+        return candidates
+
+    try:
+        end = datetime.fromisoformat(end_date).date()
+    except ValueError:
+        return candidates
+
+    cutoff = end - timedelta(days=max_age)
+    kept: list[Candidate] = []
+    dropped = 0
+    for candidate in candidates:
+        publication_date = parse_publication_date(candidate.date)
+        if publication_date is None or publication_date >= cutoff:
+            kept.append(candidate)
+        else:
+            dropped += 1
+
+    if dropped:
+        print(f"Publication-age filter dropped {dropped} older candidate record(s).")
+    return kept
+
+
 def candidate_search_text(candidate: Candidate) -> str:
     return " ".join(
         [
@@ -819,19 +895,55 @@ You are preparing an email-ready daily literature digest for a psychology and co
 Hard requirements:
 - Output English only.
 - Use only the candidate records supplied below. Do not invent papers, DOIs, authors, dates, or summaries.
-- Include every supplied candidate record in the digest, except exact duplicates or records excluded by the private Section B relevance rules. Do not select only the most important papers and do not omit lower-priority supplied records merely to shorten the digest.
+- Include every supplied candidate record in the digest, except exact duplicates or records excluded by the section relevance rules. Do not select only the most important papers and do not omit lower-priority supplied records merely to shorten the digest.
 - Include a concise Subject line, From line, and To line.
 - Keep the digest readable and avoid flooding.
 - Mention the coverage window: {start_date} to {end_date}, generated on {today}.
 - Avoid duplicates across sections: if a paper fits multiple sections, highlight it once and briefly cross-reference it if needed.
-- Follow the private digest configuration exactly. It contains the section titles, search scope, inclusion and exclusion preferences, and final highlight instructions.
-- If there are many records, use concise compact entries for lower-priority items, but still include all supplied records that pass the section rules. The final highlight section should name 5 to 6 papers worth reading first; it should not replace the full section listings.
+- Follow the digest configuration exactly for section titles, inclusion/exclusion preferences, and final highlight instructions.
 - The candidate list has already been capped before reaching you. If the list is long, keep Section A and Section B readable but complete, and make Section C compact.
+- Do not print scope descriptions, parenthetical scope notes, excluded-item examples, discarded-item examples, implementation notes, or suggestions for follow-up services.
+- Do not create "Highlighted", "Compact", "Grouped by journal", "Related", or other extra subsections inside Section A, Section B, or Section C.
+- Do not write placeholder lines such as "additional papers included" or "see candidate set"; every included candidate must have its own visible entry.
+- Do not end with "End of digest", "If you want", or a menu of possible next actions.
+
+Required output structure:
+
+Subject: Daily Literature Digest - {start_date} to {end_date}
+From: {sender}
+To: {recipient}
+
+Coverage window: {start_date} to {end_date}. Generated on {today}.
+
+Section A: fNIRS Topic Tracker
+If there are no Section A records, write exactly: No candidate records today.
+Otherwise list each Section A record as a numbered item using exactly this fields-only format:
+1. Title
+   Authors: ...
+   Date / Venue: ...
+   DOI / URL: ...
+   Why matched: ...
+   Summary: one to two concise sentences.
+   Priority: 1-5
+
+Section B: CNS Psychology / Cognitive Neuroscience / BCI Watchlist
+If there are no Section B records, write exactly: No high-fit candidate records today.
+Do not mention excluded or discarded records.
+Otherwise use the same numbered fields-only format as Section A.
+
+Section C: Full Journal Push
+If there are no Section C records, write exactly: No candidate records today.
+Otherwise list each Section C record as one compact numbered line:
+1. Title - Authors. Venue, date. DOI / URL. Note: one concise sentence.
+Do not group Section C by journal, topic, age, category, or importance.
+
+{config.get("final_section_title", "Today Highlight")}
+Use the final-section instruction from the digest configuration for how many papers to name. Use bullet points only. Choose only from records already listed above. Keep each bullet to one sentence.
 
 From: {sender}
 To: {recipient}
 
-Private digest configuration:
+Digest configuration, for rules only; do not quote it directly:
 {json.dumps(config, ensure_ascii=True, indent=2)}
 
 Candidate records:
@@ -1013,7 +1125,8 @@ def main() -> int:
     end_date = end.isoformat()
 
     sent_state = load_state()
-    candidates = dedupe_candidates(collect_candidates(start_date, end_date, sender, config), sent_state)
+    candidates = filter_recent_publications(collect_candidates(start_date, end_date, sender, config), end_date)
+    candidates = dedupe_candidates(candidates, sent_state)
     candidates = limit_candidates_for_model(candidates)
     print(f"Collected {len(candidates)} unsent candidate records for {start_date} to {end_date}.")
 
